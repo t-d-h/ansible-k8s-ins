@@ -1,0 +1,10 @@
+[kubernetes:children]
+master
+worker
+
+[master]
+master-01 ansible_host=10.3.4.96             ## specify your master's ip here
+
+[worker]
+worker-01 ansible_host=10.3.4.176             ## worker ip
+worker-02 ansible_host=10.3.4.112             ## worker ip

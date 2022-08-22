@@ -1,0 +1,139 @@
+  #prepare nodes (disable swap, edit /etc/hosts)
+  #ansible-playbook main.yml -i inventory --extra-vars "containerd_version='1.6.4-1' kube_ver='1.24.1-00' init_ver='1.24.1' calico_ver='v3.21'"
+  - hosts: all
+    gather_facts: no
+    tasks:
+      - name: disable swap
+        command: sed -i '/ swap / s/^/#/' /etc/fstab
+      - name: disable swap
+        command: swapoff -a
+      - name: copy network bridge config to master nodes
+        template: 
+          src: ~/Ansible-k8s-1-master/config/k8s.conf
+          dest: /etc/sysctl.d/k8s.conf 
+          force: yes
+          mode: 0644
+  ################################################################################
+  ##Install neccessary packages for kubernetes
+  #Install Containerd
+  - hosts: all
+    tasks:
+      - name: install necessary packages for containerd
+        apt:
+          name: "{{  item  }}"
+          state: latest
+        loop:
+          - ca-certificates
+          - curl
+          - lsb-release
+          - apparmor
+      - name: create keyrings directory 
+        file:
+          path: /etc/apt/keyrings
+          state: directory
+      - name: Install new Docker gpg key
+        apt_key:
+          url: https://download.docker.com/linux/debian/gpg
+          keyring: /etc/apt/keyrings/docker.gpg
+          state: present
+      - name:  Copy Containerd source list, if exist will replace if the contents are different
+        ignore_errors: True
+        copy: 
+          src: ~/Ansible-k8s-1-master/config/docker.list
+          dest: /etc/apt/sources.list.d/docker.list 
+          mode: '0777'
+          force: yes
+      - name: update
+        apt:
+          update_cache: yes
+      - name: Install containerd
+        apt:
+          name: "{{  item  }}"
+        loop:
+          - containerd.io={{containerd_version}}
+          - docker-ce #we wont use docker, just install to config somethings
+      - name: start and enable containerd service
+        service:
+          name: containerd
+          state: started
+          enabled: yes
+      - name: config containerd
+        copy:
+          src: ~/Ansible-k8s-1-master/config/config.toml
+          dest: /etc/containerd/config.toml
+          force: yes
+      - name: restart containerd
+        service:
+          name: containerd
+          state: restarted
+  #Install kubeadm and kubelet
+  - hosts: all
+    tasks:
+      - name: Add Google Cloud public signing key
+        apt_key:
+          url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+          keyring: /usr/share/keyrings/kubernetes-archive-keyring.gpg
+          state: present
+      - name: copy kubernetes.list to nodes
+        copy:
+          src: ~/Ansible-k8s-1-master/config/kubernetes.list
+          dest: /etc/apt/sources.list.d/kubernetes.list
+          mode: 0777
+          force: yes
+      - name: update
+        apt:
+          update_cache: yes  
+      - name: Install kubelet, kubeadm and its dependencies
+        apt:
+          name: "{{  item  }}"
+        loop:
+          - kubelet={{kube_ver}}
+          - kubeadm={{kube_ver}}
+          - kubectl
+
+  #Init K8s cluster on master node 
+  - hosts: master
+    tasks:
+      - name: check if k8s cluster is created
+        uri:
+          url: https://localhost:6443/readyz?verbose
+          validate_certs: no
+          status_code: [-1,200]
+        register: master_result
+
+      - name: Init kubernetes clustter on master-01
+        command: kubeadm init --kubernetes-version="{{init_ver}}"
+        when: "'Connection refused' in master_result.msg"
+      - name: Create /root/.kube folder
+        file:
+          path: /root/.kube
+          state: directory
+        when: "'Connection refused' in master_result.msg"
+      - name: copy admin.conf in master nodes
+        command: cp /etc/kubernetes/admin.conf /root/.kube/config
+        when: "'Connection refused' in master_result.msg"
+      - name: Apply Calico network plugin on master-01
+        command: kubectl apply -f https://docs.projectcalico.org/{{calico_ver}}/manifests/calico.yaml
+        when: "'Connection refused' in master_result.msg"
+
+      - name: Get join command 
+        command: kubeadm token create --print-join-command
+        register: join_command
+        when: "'Connection refused' in master_result.msg"
+      - name: set join command to fact to take it to worker play
+        set_fact:
+          join_command: "{{join_command.stdout_lines[0]}}"
+        when: "'Connection refused' in master_result.msg"
+
+  # join worker to cluster
+  - hosts: worker
+    tasks:
+      - name: Check status of worker nodes
+        uri:
+          url: https://localhost:10250/healthz
+          validate_certs: no
+          status_code: [-1,401]
+        register: worker_result
+      - name: Join worker to master node
+        command: "{{hostvars['master-01'].join_command}}"
+        when: "'Connection refused' in worker_result.msg"
