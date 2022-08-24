@@ -1,5 +1,5 @@
 #prepare nodes (disable swap, edit /etc/hosts)
-#ansible-playbook main.yml -i inventory --extra-vars "containerd_version='1.6.4-1' kube_ver='1.24.1-00' etcd_ver='v3.4.19' 1init_ver='1.24.1' calico_ver='v3.21'"
+#ansible-playbook main.yml -i inventory --extra-vars "containerd_version='1.6.4-1' kube_ver='1.24.1-00' etcd_ver='v3.4.19' init_ver='1.24.1' calico_ver='v3.21'"
 - hosts: all
   gather_facts: no
   tasks:
@@ -174,7 +174,7 @@
       when: etcd.state == "absent" and etcd_result.status == -1
     - name: get etcdctl 
       command: mv /usr/local/bin/etcd-{{etcd_ver}}-linux-amd64/etcdctl /usr/local/bin/
-      when: etcd_result.status == -1 
+      when: etcd_result.status == -1 and etcd.state == "absent"
 # Create system daemon unit file for etcd in master node and worker-01, worker-02
 - hosts: all
   vars:
@@ -270,7 +270,6 @@
     command: dpkg-query -l "kubelet"
     register: kubelet_check
     ignore_errors: yes
-
   - name: Add Google Cloud public signing key
     apt_key:
       url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
@@ -302,6 +301,7 @@
   - ip1: "{{hostvars['master-01'].ansible_host}}"
   - ip2: "{{hostvars['worker-01'].ansible_host}}"
   - ip3: "{{hostvars['worker-02'].ansible_host}}"
+  - hostnamek: "{{ansible_nodename}}"
   tasks:
     - name: check if k8s cluster is created
       uri:
