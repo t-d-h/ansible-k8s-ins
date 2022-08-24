@@ -1,147 +1,355 @@
-  #prepare nodes (disable swap, edit /etc/hosts)
-  #ansible-playbook main.yml -i inventory --extra-vars "containerd_version='1.6.4-1' kube_ver='1.24.1-00' init_ver='1.24.1' calico_ver='v3.21'"
-  - hosts: all
-    gather_facts: no
-    tasks:
-      - name: disable swap
-        lineinfile:
-          path: /etc/fstab
-          regexp: "swap" 
-          state: absent
-      - name: disable swap
-        command: swapoff -a
-      - name: Config network bridge
-        blockinfile:
-          path: /etc/sysctl.d/k8s.conf
-          block: |
-            net.bridge.bridge-nf-call-ip6tables = 1 
-            net.bridge.bridge-nf-call-iptables = 1
-          create: yes
-          state: present
-  ###############################################################################
-  ##Install Containerd
-  - hosts: all
-    tasks:
-      - name: install necessary packages for containerd
-        apt:
-          name: "{{  item  }}"
-          state: latest
-        loop:
-          - ca-certificates
-          - curl
-          - lsb-release
-          - apparmor
-      - name: create keyrings directory 
-        file:
-          path: /etc/apt/keyrings
-          state: directory
-      - name: Install new Docker gpg key
-        apt_key:
-          url: https://download.docker.com/linux/debian/gpg
-          keyring: /etc/apt/keyrings/docker.gpg
-          state: present
-      - name: Add docker repo
-        lineinfile:
-          path: /etc/apt/sources.list.d/docker.list
-          line: deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian buster stable
-          create: yes
-      - name: update
-        apt:
-          update_cache: yes
-      - name: Install containerd
-        apt:
-          name: "{{  item  }}"
-        loop:
-          - containerd.io={{containerd_version}}
-          - docker-ce #we wont use docker, just install to config somethings
-      - name: start and enable containerd service
-        service:
-          name: containerd
-          state: started
-          enabled: yes
-      - name: Remove defaults config of containerd
-        file:
-          path: /etc/containerd/config.toml
-          state: absent
-      - name: Config containerd
-        blockinfile:
-          path: /etc/containerd/config.toml
-          block: |
-            [plugins."io.containerd.grpc.v1.cri"]
-              systemd_cgroup = true
-          state: present
-          create: yes
-      - name: restart containerd
-        service:
-          name: containerd
-          state: restarted
-  #Install kubeadm and kubelet
-  - hosts: all
-    tasks:
-      - name: Add Google Cloud public signing key
-        apt_key:
-          url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
-          keyring: /usr/share/keyrings/kubernetes-archive-keyring.gpg
-          state: present
-      - name: Add kubernetes repo
-        lineinfile:
-          path: /etc/apt/sources.list.d/kubernetes.list
-          line: deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main
-          create: yes
-      - name: update
-        apt:
-          update_cache: yes  
-      - name: Install kubelet, kubeadm and its dependencies
-        apt:
-          name: "{{  item  }}"
-        loop:
-          - kubelet={{kube_ver}}
-          - kubeadm={{kube_ver}}
-          - kubectl
+#prepare nodes (disable swap, edit /etc/hosts)
+#ansible-playbook main.yml -i inventory --extra-vars "containerd_version='1.6.4-1' kube_ver='1.24.1-00' etcd_ver='v3.4.19' 1init_ver='1.24.1' calico_ver='v3.21'"
+- hosts: all
+  gather_facts: no
+  tasks:
+    - name: disable swap
+      lineinfile:
+        path: /etc/fstab
+        regexp: "swap" 
+        state: absent
+    - name: disable swap
+      command: swapoff -a
+    - name: Config network bridge
+      blockinfile:
+        path: /etc/sysctl.d/k8s.conf
+        block: |
+          net.bridge.bridge-nf-call-ip6tables = 1 
+          net.bridge.bridge-nf-call-iptables = 1
+        create: yes
+        state: present
+    - name: install necessary packages
+      apt:
+        name: "{{  item  }}"
+        state: latest
+      loop:
+        - ca-certificates
+        - curl
+        - lsb-release
+        - apparmor
+####################################################################################
+#Create some Certificates and bring it to etcd directory
+- hosts: master
+  vars:
+    - ip1: "{{hostvars['master-01'].ansible_host}}"
+    - ip2: "{{hostvars['worker-01'].ansible_host}}"
+    - ip3: "{{hostvars['worker-02'].ansible_host}}"
+  tasks:
+    - name: check if cert is generated in master node
+      file:
+        path: /root/kubernetes.pem
+      register: cert_check
+      ignore_errors: yes
 
-  #Init K8s cluster on master node 
-  - hosts: master
-    tasks:
-      - name: check if k8s cluster is created
-        uri:
-          url: https://localhost:6443/readyz?verbose
-          validate_certs: no
-          status_code: [-1,200]
-        register: master_result
+    - name: Create /root/cert in master node
+      file:
+        path: /root/cert/
+        state: directory
+      when: cert_check.state == "absent"
+    - name: copy CloudflareSSL binary to master node
+      copy: 
+        src: ssl-config/cfssl_linux-amd64
+        dest: /usr/local/bin/cfssl
+        owner: root 
+        group: root
+        mode: 0777
+      when: cert_check.state == "absent"
+    - name: copy CloudflareSSL binary to master node
+      copy: 
+        src: ssl-config/cfssljson_linux-amd64
+        dest: /usr/local/bin/cfssljson 
+        owner: root 
+        group: root
+        mode: 0777
+      when: cert_check.state == "absent"
+    - name: copying some jsons . . 
+      copy: 
+        src: "{{  item  }}"
+        dest: /root/cert/
+        owner: root 
+        group: root
+        mode: 0777
+      with_items:
+        - ssl-config/ca-config.json
+        - ssl-config/ca-csr.json
+        - ssl-config/kubernetes-csr.json
+      when: cert_check.state == "absent"
+    - name: Create Cert generate script 1
+      lineinfile:
+        path: /root/cert/gencert1
+        line: cfssl gencert -initca /root/cert/ca-csr.json | cfssljson -bare ca
+        create: yes
+        mode: 0777
+      when: cert_check.state == "absent"
+    - name: Create Cert generate script 2
+      blockinfile:
+        path: /root/cert/gencert2
+        block: |
+          cfssl gencert \
+          -ca=/root/ca.pem \
+          -ca-key=/root/ca-key.pem \
+          -config=/root/cert/ca-config.json \
+          -hostname={{  ip1  }},{{  ip2  }},{{  ip3  }},127.0.0.1,kubernetes.default \
+          -profile=kubernetes /root/cert/kubernetes-csr.json | \
+          cfssljson -bare kubernetes
+        create: yes
+        mode: 0777
+        state: present
+      when: cert_check.state == "absent"
+    - name: generate ca.pem
+      command: bash /root/cert/gencert1
+      when: cert_check.state == "absent"
+    - name: generate kubernetes.pem and kubernetes-key.pem
+      command: bash /root/cert/gencert2
+      when: cert_check.state == "absent"
+    - name: copy cert to ansible node
+      run_once: yes
+      fetch:
+        src: "{{  item  }}"
+        dest: ssl/
+        flat: yes
+      with_items:
+        - /root/ca.pem
+        - /root/kubernetes-key.pem
+        - /root/kubernetes.pem
+      when: cert_check.state == "absent"
+    - name: cleaning ...
+      command: rm -rf ca.csr ca-key.pem cert kubernetes.csr
+      when: cert_check.state == "absent"
+########################################################################################
+#Create etcd cluster
+- hosts: all
+  tasks:
+    - name: check if etcd is running 
+      uri:
+        url: http://192.168.1.191:2381/metrics
+        status_code: [-1,200]
+      register: etcd_result
 
-      - name: Init kubernetes clustter on master-01
-        command: kubeadm init --kubernetes-version="{{init_ver}}"
-        when: "'Connection refused' in master_result.msg"
-      - name: Create /root/.kube folder
-        file:
-          path: /root/.kube
-          state: directory
-        when: "'Connection refused' in master_result.msg"
-      - name: copy admin.conf in master nodes
-        command: cp /etc/kubernetes/admin.conf /root/.kube/config
-        when: "'Connection refused' in master_result.msg"
-      - name: Apply Calico network plugin on master-01
-        command: kubectl apply -f https://docs.projectcalico.org/{{calico_ver}}/manifests/calico.yaml
-        when: "'Connection refused' in master_result.msg"
+    - name: Create user to execute etcd
+      user: 
+        name: etcd
+      when: etcd_result.status == -1
+    - name: create etcd directory
+      file:
+        path: /etc/etcd/
+        state: directory
+        owner: etcd
+        group: etcd
+        mode: 0744
+      when: etcd_result.status == -1
+    - name: create etcd data directory
+      file:
+        path: /var/lib/etcd/
+        state: directory
+        owner: etcd
+        group: etcd
+        mode: 0744
+      when: etcd_result.status == -1
+    - name: distribute certs to every master nodes
+      copy:
+        src: "{{  item  }}"
+        dest: /etc/etcd/
+        owner: etcd
+      with_items:
+        - ssl/ca.pem
+        - ssl/kubernetes-key.pem
+        - ssl/kubernetes.pem
+      when: etcd_result.status == -1
+    - name: check if /usr/local/bin had etcd binaries
+      file:
+        path: /usr/local/bin/etcd-{{etcd_ver}}-linux-amd64
+      register: etcd
+      ignore_errors: yes
+    - name: Get etcd binary
+      unarchive:
+        src: https://github.com/etcd-io/etcd/releases/download/{{etcd_ver}}/etcd-{{etcd_ver}}-linux-amd64.tar.gz
+        dest: /usr/local/bin/
+        remote_src: yes
+        owner: etcd
+        group: etcd
+        mode: 0744
+        exclude: [Documentation, README.md, README-etcdctl.md, READMEv2-etcdctl.md]
+        validate_certs: no
+      when: etcd.state == "absent" and etcd_result.status == -1
+    - name: get etcdctl 
+      command: mv /usr/local/bin/etcd-{{etcd_ver}}-linux-amd64/etcdctl /usr/local/bin/
+      when: etcd_result.status == -1 
+# Create system daemon unit file for etcd in master node and worker-01, worker-02
+- hosts: all
+  vars:
+    - ip: "{{ansible_host}}"
+    - ip1: "{{hostvars['master-01'].ansible_host}}"
+    - ip2: "{{hostvars['worker-01'].ansible_host}}"
+    - ip3: "{{hostvars['worker-02'].ansible_host}}"
+    - hostname: "{{ansible_nodename}}"
+    - hostname1: "{{hostvars[groups['master'][0]]['ansible_nodename']}}"
+    - hostname2: "{{hostvars[groups['worker'][0]]['ansible_nodename']}}"
+    - hostname3: "{{hostvars[groups['worker'][1]]['ansible_nodename']}}"
+  tasks:
+    - name: config system daemon for etcd in master-01
+      template:
+        src: etcd/etcd.service
+        dest: /etc/systemd/system/etcd.service
+        force: yes
+      when: etcd_result.status == -1
+    - name: reload system daemon
+      systemd:
+        name: etcd
+        daemon_reload: yes
+        state: started
+        enabled: yes
+      when: etcd_result.status == -1
+###############################################################################
+##Install Containerd
+- hosts: all
+  tasks:
+    - name: check if containerd.io installed on node
+      command: dpkg-query -l "containerd.io"
+      register: containerd_check
+      ignore_errors: yes
 
-      - name: Get join command 
-        command: kubeadm token create --print-join-command
-        register: join_command
-        when: "'Connection refused' in master_result.msg"
-      - name: set join command to fact to take it to worker play
-        set_fact:
-          join_command: "{{join_command.stdout_lines[0]}}"
-        when: "'Connection refused' in master_result.msg"
+    - name: create keyrings directory 
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+      when: '"no packages found" in containerd_check.stderr'
+    - name: Install new Docker gpg key
+      apt_key:
+        url: https://download.docker.com/linux/debian/gpg
+        keyring: /etc/apt/keyrings/docker.gpg
+        state: present
+      when: '"no packages found" in containerd_check.stderr'
+    - name: Add docker repo
+      lineinfile:
+        path: /etc/apt/sources.list.d/docker.list
+        line: deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian buster stable
+        create: yes
+      when: '"no packages found" in containerd_check.stderr'
+    - name: update
+      apt:
+        update_cache: yes
+      when: '"no packages found" in containerd_check.stderr'
+    - name: Install containerd
+      apt:
+        name: "{{  item  }}"
+      loop:
+        - containerd.io={{containerd_version}}
+        - docker-ce #we wont use docker, just install to config some things
+      when: '"no packages found" in containerd_check.stderr'
+    - name: start and enable containerd service
+      service:
+        name: containerd
+        state: started
+        enabled: yes
+      when: '"no packages found" in containerd_check.stderr'
+    - name: Remove defaults config of containerd
+      file:
+        path: /etc/containerd/config.toml
+        state: absent
+      when: '"no packages found" in containerd_check.stderr'
+    - name: Config containerd
+      blockinfile:
+        path: /etc/containerd/config.toml
+        block: |
+          [plugins."io.containerd.grpc.v1.cri"]
+            systemd_cgroup = true
+        state: present
+        create: yes
+      when: '"no packages found" in containerd_check.stderr'
+    - name: restart containerd
+      service:
+        name: containerd
+        state: restarted
+      when: '"no packages found" in containerd_check.stderr'
+##########################################################################################
+#Install kubeadm and kubelet
+- hosts: all
+  tasks:
+  - name: check if kubelet installed on node
+    command: dpkg-query -l "kubelet"
+    register: kubelet_check
+    ignore_errors: yes
 
-  # join worker to cluster
-  - hosts: worker
-    tasks:
-      - name: Check status of worker nodes
-        uri:
-          url: https://localhost:10250/healthz
-          validate_certs: no
-          status_code: [-1,401]
-        register: worker_result
-      - name: Join worker to master node
-        command: "{{hostvars['master-01'].join_command}}"
-        when: "'Connection refused' in worker_result.msg"
+  - name: Add Google Cloud public signing key
+    apt_key:
+      url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+      keyring: /usr/share/keyrings/kubernetes-archive-keyring.gpg
+      state: present
+    when: '"no packages found" in kubelet_check.stderr'
+  - name: Add kubernetes repo
+    lineinfile:
+      path: /etc/apt/sources.list.d/kubernetes.list
+      line: deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main
+      create: yes
+    when: '"no packages found" in kubelet_check.stderr'
+  - name: update
+    apt:
+      update_cache: yes
+    when: '"no packages found" in kubelet_check.stderr'
+  - name: Install kubelet, kubeadm and its dependencies
+    apt:
+      name: "{{  item  }}"
+    loop:
+      - kubelet={{kube_ver}}
+      - kubeadm={{kube_ver}}
+      - kubectl
+    when: '"no packages found" in kubelet_check.stderr'
+#Init K8s cluster on master node 
+- hosts: master
+  vars:
+  - ip: "{{ansible_host}}"
+  - ip1: "{{hostvars['master-01'].ansible_host}}"
+  - ip2: "{{hostvars['worker-01'].ansible_host}}"
+  - ip3: "{{hostvars['worker-02'].ansible_host}}"
+  tasks:
+    - name: check if k8s cluster is created
+      uri:
+        url: https://localhost:6443/readyz?verbose
+        validate_certs: no
+        status_code: [-1,200]
+      register: master_result
+
+    - name: copy init config to master node
+      template:
+        src: etcd/init.yaml
+        dest: /root/init.yaml
+        mode: 0777
+        
+      when: master_result.status == -1
+    - name: kubeadm init
+      command: kubeadm init --config=init.yaml
+      when: master_result.status == -1
+    - name: Create /root/.kube folder
+      file:
+        path: /root/.kube
+        state: directory
+      when: master_result.status == -1
+    - name: copy admin.conf in master nodes
+      command: cp /etc/kubernetes/admin.conf /root/.kube/config
+      when: master_result.status == -1
+    - name: Apply Calico network plugin on master-01
+      command: kubectl apply -f https://docs.projectcalico.org/{{calico_ver}}/manifests/calico.yaml
+      when: master_result.status == -1
+
+    - name: Get join command 
+      command: kubeadm token create --print-join-command
+      register: join_command
+      when: master_result.status == -1
+    - name: set join command to fact to take it to worker play
+      set_fact:
+        join_command: "{{join_command.stdout_lines[0]}}"
+      when: master_result.status == -1
+
+# join worker to cluster
+- hosts: worker
+  tasks:
+    - name: Check status of worker nodes
+      uri:
+        url: https://localhost:10250/healthz
+        validate_certs: no
+        status_code: [-1,401]
+      register: worker_result
+    - name: Join worker to master node
+      command: "{{hostvars['master-01'].join_command}}"
+      when: worker_result.status == -1
