@@ -2,7 +2,7 @@
 This is an Ansible Playbook to create a simple Kubernetes cluster
 
 
-run command:
+example command:
 
 
 
