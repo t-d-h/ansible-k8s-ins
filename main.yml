@@ -119,10 +119,12 @@
 ########################################################################################
 #Create etcd cluster
 - hosts: all
+  vars:
+    - ip1: "{{hostvars['master-01'].ansible_host}}"
   tasks:
     - name: check if etcd is running 
       uri:
-        url: http://192.168.1.191:2381/metrics
+        url: http://{{ip1}}:2381/metrics
         status_code: [-1,200]
       register: etcd_result
 
@@ -151,6 +153,7 @@
         src: "{{  item  }}"
         dest: /etc/etcd/
         owner: etcd
+        mode: 0777
       with_items:
         - ssl/ca.pem
         - ssl/kubernetes-key.pem
