@@ -27,6 +27,7 @@
         - curl
         - lsb-release
         - apparmor
+        - gpg
 ####################################################################################
 #Create some Certificates and bring it to etcd directory
 - hosts: master
