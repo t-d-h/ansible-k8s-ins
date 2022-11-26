@@ -1,5 +1,8 @@
 # Ansible-k8s-1-master
-This is an Ansible Playbook to create a simple Kubernetes cluster
+This is an Ansible Playbook to create a simple Kubernetes cluster.
+
+
+Tested in Debian10
 
 
 example command:
